@@ -217,17 +217,49 @@ import { appRouter } from '../../../components/appRouter';
         }
 
         let mouseIsDown = false;
+        let osdShown = false;
 
         function showOsd(focusElement) {
             slideDownToShow(headerElement);
             showMainOsdControls(focusElement);
             resetIdle();
+            osdShown = true;
+
+            if (tvIntro?.Valid) {
+                const player = currentPlayer;
+                const seconds = playbackManager.currentTime(player) / 1000;
+                const skipIntro = document.querySelector(".skipIntro");
+
+                // Show the skip intro button when the OSD is shown, only during the intro period
+                if (
+                    seconds >= tvIntro.ShowSkipPromptAt
+                    && seconds <= tvIntro.IntroEnd
+                    && skipIntro.classList.contains("hidden")
+                ) {
+                    skipIntro.classList.remove("hidden");
+                }
+            }
         }
 
         function hideOsd() {
             slideUpToHide(headerElement);
             hideMainOsdControls();
             mouseManager.hideCursor();
+            osdShown = false;
+
+            if (tvIntro?.Valid) {
+                const player = currentPlayer;
+                const seconds = playbackManager.currentTime(player) / 1000;
+                const skipIntro = document.querySelector(".skipIntro");
+
+                // Hide the skip intro button when OSD closes, only outside of the window where it should always be shown
+                if (
+                    (seconds >= tvIntro.HideSkipPromptAt || seconds < tvIntro.ShowSkipPromptAt)
+                    && !skipIntro.classList.contains("hidden")
+                ) {
+                    skipIntro.classList.add("hidden");
+                }
+            }
         }
 
         function toggleOsd() {
@@ -462,7 +494,34 @@ import { appRouter } from '../../../components/appRouter';
                 updatePlaylist();
                 enableStopOnBack(true);
                 updatePlaybackRate(player);
+                getIntroTimestamps(state.NowPlayingItem);
             }
+        }
+
+        function getIntroTimestamps(item) {
+            const apiClient = ServerConnections.getApiClient(item);
+            const address = apiClient.serverAddress();
+
+            const url = `${address}/Episode/${item.Id}/IntroTimestamps`;
+            const reqInit = {
+                headers: {
+                    "Authorization": `MediaBrowser Token=${apiClient.accessToken()}`
+                }
+            };
+
+            fetch(url, reqInit).then(r => {
+                if (!r.ok) {
+                    return;
+                }
+
+                return r.json();
+            }).then(intro => {
+                tvIntro = intro;
+            });
+        }
+
+        function skipIntro() {
+            playbackManager.seekMs(tvIntro.IntroEnd * 1000);
         }
 
         function onPlayPauseStateChanged() {
@@ -582,6 +641,29 @@ import { appRouter } from '../../../components/appRouter';
                     const item = currentItem;
                     refreshProgramInfoIfNeeded(player, item);
                     showComingUpNextIfNeeded(player, item, currentTime, currentRuntimeTicks);
+
+                    // Check if an introduction sequence was detected for this item.
+                    if (tvIntro?.Valid) {
+                        const seconds = playbackManager.currentTime(player) / 1000;
+                        const skipIntro = document.querySelector(".skipIntro");
+
+                        if (seconds < tvIntro.ShowSkipPromptAt || seconds > tvIntro.IntroEnd) {
+                            // Always hide the button when we are outside of the intro range completely
+                            if (!skipIntro.classList.contains("hidden")) skipIntro.classList.add("hidden");
+                        } else if (
+                            (
+                                seconds >= tvIntro.ShowSkipPromptAt
+                                && seconds < tvIntro.HideSkipPromptAt
+                            )
+                            || osdShown
+                        ) {
+                            // Otherwise, when we are between the show/hide range, always show, or do nothing
+                            if (skipIntro.classList.contains("hidden")) skipIntro.classList.remove("hidden");
+                        } else if (!osdShown) {
+                            // If we are here, then the on screen display is hidden
+                            if (!skipIntro.classList.contains("hidden")) skipIntro.classList.add("hidden");
+                        }
+                    }
                 }
             }
         }
@@ -1318,6 +1400,7 @@ import { appRouter } from '../../../components/appRouter';
         let programEndDateMs = 0;
         let playbackStartTimeTicks = 0;
         let subtitleSyncOverlay;
+        let tvIntro;
         const nowPlayingVolumeSlider = view.querySelector('.osdVolumeSlider');
         const nowPlayingVolumeSliderContainer = view.querySelector('.osdVolumeSliderContainer');
         const nowPlayingPositionSlider = view.querySelector('.osdPositionSlider');
@@ -1467,6 +1550,11 @@ import { appRouter } from '../../../components/appRouter';
         let lastPointerDown = 0;
         /* eslint-disable-next-line compat/compat */
         dom.addEventListener(view, window.PointerEvent ? 'pointerdown' : 'click', function (e) {
+            // If the user clicked the skip intro button, don't pause the video. Fixes ConfusedPolarBear/intro-skipper#44.
+            if (dom.parentWithClass(e.target, ['btnSkipIntro'])) {
+                return;
+            }
+
             if (dom.parentWithClass(e.target, ['videoOsdBottom', 'upNextContainer'])) {
                 return void showOsd();
             }
@@ -1594,6 +1682,7 @@ import { appRouter } from '../../../components/appRouter';
         });
         view.querySelector('.btnAudio').addEventListener('click', showAudioTrackSelection);
         view.querySelector('.btnSubtitles').addEventListener('click', showSubtitleTrackSelection);
+        view.querySelector('.btnSkipIntro').addEventListener('click', skipIntro);
 
         // Register to SyncPlay playback events and show big animated icon
         const showIcon = (action) => {
